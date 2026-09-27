@@ -27,7 +27,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           test "$(. /etc/os-release; printf '%s' "${ID:-}")" = ubuntu
-          packages=(ca-certificates git nsis)
+          packages=(ca-certificates curl git nsis xz-utils)
           if [[ "$EUID" -eq 0 ]]; then
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
@@ -38,7 +38,6 @@ jobs:
             echo 'Installing cross-build dependencies requires root or sudo.' >&2
             exit 1
           fi
-
       - name: Check out event commit
         shell: bash
         run: |
@@ -56,6 +55,10 @@ jobs:
           GIT_CONFIG_VALUE_0="Authorization: Basic $credentials" \
             git -C source fetch --no-tags --depth=1 origin "$GITHUB_SHA"
           git -C source checkout --detach FETCH_HEAD
+
+      - name: Install Node.js for Forgejo artifact actions
+        shell: bash
+        run: bash source/build-scripts/install-node-runtime.sh
 
       - name: Build Windows x64 installer
         shell: bash
@@ -87,7 +90,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           test "$(. /etc/os-release; printf '%s' "${ID:-}")" = ubuntu
-          packages=(ca-certificates git nsis)
+          packages=(ca-certificates curl git nsis xz-utils)
           if [[ "$EUID" -eq 0 ]]; then
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
@@ -98,7 +101,6 @@ jobs:
             echo 'Installing cross-build dependencies requires root or sudo.' >&2
             exit 1
           fi
-
       - name: Check out event commit
         shell: bash
         run: |
@@ -116,6 +118,10 @@ jobs:
           GIT_CONFIG_VALUE_0="Authorization: Basic $credentials" \
             git -C source fetch --no-tags --depth=1 origin "$GITHUB_SHA"
           git -C source checkout --detach FETCH_HEAD
+
+      - name: Install Node.js for Forgejo artifact actions
+        shell: bash
+        run: bash source/build-scripts/install-node-runtime.sh
 
       - name: Build Windows ARM64 installer
         shell: bash
@@ -151,7 +157,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           test "$(. /etc/os-release; printf '%s' "${ID:-}")" = ubuntu
-          packages=(ca-certificates curl git gnupg jq)
+          packages=(ca-certificates curl git gnupg jq xz-utils)
           if [[ "$EUID" -eq 0 ]]; then
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
@@ -162,7 +168,6 @@ jobs:
             echo 'Installing signing dependencies requires root or sudo.' >&2
             exit 1
           fi
-
       - name: Check out event commit
         shell: bash
         run: |
@@ -180,6 +185,10 @@ jobs:
           GIT_CONFIG_VALUE_0="Authorization: Basic $credentials" \
             git -C source fetch --no-tags --depth=1 origin "$GITHUB_SHA"
           git -C source checkout --detach FETCH_HEAD
+
+      - name: Install Node.js for Forgejo artifact actions
+        shell: bash
+        run: bash source/build-scripts/install-node-runtime.sh
 
       - name: Download Windows x64 candidate
         uses: https://code.forgejo.org/forgejo/download-artifact@v4
