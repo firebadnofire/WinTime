@@ -57,7 +57,7 @@ The script rejects non-Ubuntu systems and mismatched host CPUs. Both packages co
 
 ## Release workflow
 
-Every pushed commit runs `.forgejo/workflows/build.yml`. Windows x64 packages are cross-compiled on `ubuntu-22.04`; Windows ARM64 packages are cross-compiled on `arm-ubuntu-22.04`. Each build installs Ubuntu's `nsis` package and uploads its installer as a short-lived Forgejo Actions artifact.
+Every pushed commit runs `.forgejo/workflows/build.yml`. Windows x64 packages are cross-compiled on `ubuntu-22.04`; Windows ARM64 packages are cross-compiled on `arm-ubuntu-22.04`. Before checkout, each build installs Git, CA certificates, and Ubuntu's `nsis` package, then uploads its installer as a short-lived Forgejo Actions artifact.
 
 To protect signing and publication credentials, only trusted pushes to `main` and `v*` tags aggregate and sign both installers. A trusted `main` push also mirrors Forgejo branches and tags to GitHub. A version tag matching the installer version, such as `v1.0.0`, additionally creates or updates the Forgejo and GitHub releases. Manual runs and other branches build both installers without receiving signing or GitHub credentials.
 
