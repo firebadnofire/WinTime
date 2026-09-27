@@ -44,9 +44,22 @@ To build an installer restricted to a specific 64-bit Windows architecture, use 
 .\build-scripts\build.ps1 -Architecture arm64 -OutputFileName 'WinTime-1.0.0-windows-arm64-setup.exe'
 ```
 
+The Forgejo workflow cross-compiles the release installers on Ubuntu instead. Install the distribution-provided NSIS compiler, then run the Linux build script on a host whose CPU matches the requested target:
+
+```bash
+sudo apt-get install nsis
+bash build-scripts/build-linux.sh x64 WinTime-1.0.0-windows-x64-setup.exe
+# On an aarch64 Ubuntu host:
+bash build-scripts/build-linux.sh arm64 WinTime-1.0.0-windows-arm64-setup.exe
+```
+
+The script rejects non-Ubuntu systems and mismatched host CPUs. Both packages contain architecture-neutral PowerShell payloads, but each installer checks the native Windows architecture and refuses the wrong target.
+
 ## Release workflow
 
-Pushing a version tag matching the installer version, such as `v1.0.0`, runs `.forgejo/workflows/build.yml` on the self-hosted runner with both the `windows-latest` and `win11` labels. The runner must provide Windows PowerShell 5.1 or later, Git, GnuPG, and Inno Setup 6.
+Every pushed commit runs `.forgejo/workflows/build.yml`. Windows x64 packages are cross-compiled on `ubuntu-22.04`; Windows ARM64 packages are cross-compiled on `arm-ubuntu-22.04`. Each build installs Ubuntu's `nsis` package and uploads its installer as a short-lived Forgejo Actions artifact.
+
+To protect signing and publication credentials, only trusted pushes to `main` and `v*` tags aggregate and sign both installers. A trusted `main` push also mirrors Forgejo branches and tags to GitHub. A version tag matching the installer version, such as `v1.0.0`, additionally creates or updates the Forgejo and GitHub releases. Manual runs and other branches build both installers without receiving signing or GitHub credentials.
 
 The workflow requires these repository secrets:
 
@@ -92,14 +105,16 @@ Get-ScheduledTaskInfo -TaskName 'TimeSyncAtLogon' -TaskPath '\' |
 ## Project layout
 
 ```text
-installer/TimeSync.iss       Inno Setup definition
+installer/TimeSync.iss       Windows/Inno Setup definition
+installer/TimeSync.nsi       Ubuntu/NSIS cross-build definition
 scripts/install-task.ps1     Idempotent task registration and upgrade rollback
 scripts/sync-time.ps1        One-shot time synchronization action
 scripts/uninstall-task.ps1   Idempotent task and event-source removal
-build-scripts/build.ps1      Canonical build entry point
+build-scripts/build.ps1      Windows/Inno Setup build entry point
+build-scripts/build-linux.sh Ubuntu/NSIS cross-build entry point
 dist/                        Generated installer output
 ```
 
 ## Runtime requirements
 
-The installed utility uses only Windows PowerShell 5.1, Task Scheduler, the Windows Event Log, the Windows Time service, and `w32tm.exe`, all included with supported Windows 10 and Windows 11 systems. Inno Setup is not required on end-user computers.
+The installed utility uses only Windows PowerShell 5.1, Task Scheduler, the Windows Event Log, the Windows Time service, and `w32tm.exe`, all included with supported Windows 10 and Windows 11 systems. Inno Setup and NSIS are not required on end-user computers.

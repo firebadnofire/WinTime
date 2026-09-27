@@ -1,7 +1,9 @@
-name: Build and publish Windows installers
+name: Build Windows installers
 
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
   workflow_dispatch:
@@ -10,548 +12,318 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build-sign-publish:
-    name: Build, sign, and publish
-    runs-on: [windows-latest, win11]
-    timeout-minutes: 30
-
-    defaults:
-      run:
-        shell: powershell
+  build-windows-x64:
+    name: Cross-compile Windows x64 installer
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
 
     steps:
-      - name: Check out the release commit
+      - name: Check out event commit
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
+          set -Eeuo pipefail
+          : "${FORGEJO_TOKEN:?Forgejo did not provide FORGEJO_TOKEN}"
+          : "${GITHUB_SHA:?Forgejo did not provide GITHUB_SHA}"
 
-          foreach ($command in @('git.exe', 'gpg.exe')) {
-              if ($null -eq (Get-Command -Name $command -CommandType Application -ErrorAction SilentlyContinue)) {
-                  throw "Required command '$command' is not installed on the Windows runner."
-              }
-          }
+          repository_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?}}/${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?}}.git"
+          credentials="$(printf 'x-access-token:%s' "$FORGEJO_TOKEN" | base64 -w0)"
+          test ! -e source || { echo 'The isolated source directory already exists.' >&2; exit 1; }
+          git init source
+          git -C source remote add origin "$repository_url"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.extraHeader \
+          GIT_CONFIG_VALUE_0="Authorization: Basic $credentials" \
+            git -C source fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git -C source checkout --detach FETCH_HEAD
 
-          if ([string]::IsNullOrWhiteSpace($env:FORGEJO_TOKEN)) {
-              throw 'FORGEJO_TOKEN was not provided by Forgejo Actions.'
-          }
-
-          $ref = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_REF)) {
-              $env:FORGEJO_REF
-          }
-          else {
-              $env:GITHUB_REF
-          }
-
-          if ($ref -notmatch '^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)$') {
-              throw "This workflow publishes releases only from version tags such as v1.0.0. Received '$ref'."
-          }
-
-          $tag = $Matches[1]
-          $serverUrl = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_SERVER_URL)) {
-              $env:FORGEJO_SERVER_URL
-          }
-          else {
-              $env:GITHUB_SERVER_URL
-          }
-          $repository = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_REPOSITORY)) {
-              $env:FORGEJO_REPOSITORY
-          }
-          else {
-              $env:GITHUB_REPOSITORY
-          }
-          $commitSha = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_SHA)) {
-              $env:FORGEJO_SHA
-          }
-          else {
-              $env:GITHUB_SHA
-          }
-          $environmentFile = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_ENV)) {
-              $env:FORGEJO_ENV
-          }
-          else {
-              $env:GITHUB_ENV
-          }
-          if ([string]::IsNullOrWhiteSpace($serverUrl) -or
-              [string]::IsNullOrWhiteSpace($repository) -or
-              [string]::IsNullOrWhiteSpace($commitSha) -or
-              [string]::IsNullOrWhiteSpace($environmentFile) -or
-              [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
-              throw 'Required Forgejo Actions repository context is unavailable.'
-          }
-
-          $repositoryUrl = "$serverUrl/$repository.git"
-          $runId = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_RUN_ID)) {
-              $env:FORGEJO_RUN_ID
-          }
-          else {
-              $env:GITHUB_RUN_ID
-          }
-          $runAttempt = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_RUN_ATTEMPT)) {
-              $env:FORGEJO_RUN_ATTEMPT
-          }
-          else {
-              $env:GITHUB_RUN_ATTEMPT
-          }
-          if ($runId -notmatch '^[0-9]+$') {
-              throw "The workflow run ID is unavailable or invalid: '$runId'."
-          }
-          if ($runAttempt -notmatch '^[0-9]+$') {
-              $runAttempt = '1'
-          }
-          $sourceDirectory = Join-Path `
-              -Path $env:RUNNER_TEMP `
-              -ChildPath "wintime-source-$runId-$runAttempt"
-          if (Test-Path -LiteralPath $sourceDirectory) {
-              throw "The isolated checkout path already exists: '$sourceDirectory'."
-          }
-          New-Item -ItemType Directory -Path $sourceDirectory | Out-Null
-          $credentials = [Convert]::ToBase64String(
-              [Text.Encoding]::ASCII.GetBytes("x-access-token:$env:FORGEJO_TOKEN")
-          )
-
-          git -C $sourceDirectory init .
-          if ($LASTEXITCODE -ne 0) {
-              throw "git init failed with exit code $LASTEXITCODE."
-          }
-
-          $existingOrigin = git -C $sourceDirectory remote get-url origin 2>$null
-          if ($LASTEXITCODE -eq 0) {
-              git -C $sourceDirectory remote set-url origin $repositoryUrl
-          }
-          else {
-              git -C $sourceDirectory remote add origin $repositoryUrl
-          }
-          if ($LASTEXITCODE -ne 0) {
-              throw "Configuring the Forgejo origin failed with exit code $LASTEXITCODE."
-          }
-
-          try {
-              $env:GIT_CONFIG_COUNT = '1'
-              $env:GIT_CONFIG_KEY_0 = 'http.extraHeader'
-              $env:GIT_CONFIG_VALUE_0 = "Authorization: Basic $credentials"
-              git -C $sourceDirectory fetch --no-tags --depth=1 origin $commitSha
-              if ($LASTEXITCODE -ne 0) {
-                  throw "Fetching release commit $commitSha failed with exit code $LASTEXITCODE."
-              }
-          }
-          finally {
-              Remove-Item Env:GIT_CONFIG_COUNT -ErrorAction SilentlyContinue
-              Remove-Item Env:GIT_CONFIG_KEY_0 -ErrorAction SilentlyContinue
-              Remove-Item Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
-          }
-
-          git -C $sourceDirectory checkout --detach --force FETCH_HEAD
-          if ($LASTEXITCODE -ne 0) {
-              throw "Checking out release commit $commitSha failed with exit code $LASTEXITCODE."
-          }
-
-          $utf8NoBom = New-Object Text.UTF8Encoding($false)
-          [IO.File]::AppendAllText($environmentFile, "RELEASE_TAG=$tag`n", $utf8NoBom)
-          [IO.File]::AppendAllText($environmentFile, "SOURCE_DIRECTORY=$sourceDirectory`n", $utf8NoBom)
-
-      - name: Validate version and build dependencies
+      - name: Install cross-packaging dependency
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          Set-Location -LiteralPath $env:SOURCE_DIRECTORY
+          set -Eeuo pipefail
+          test "$(. /etc/os-release; printf '%s' "${ID:-}")" = ubuntu
+          if [[ "$EUID" -eq 0 ]]; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nsis
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nsis
+          else
+            echo 'Installing NSIS requires root or sudo.' >&2
+            exit 1
+          fi
 
-          $installerDefinition = Get-Content -LiteralPath 'installer\TimeSync.iss' -Raw
-          if ($installerDefinition -notmatch '(?m)^#define AppVersion "([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)"$') {
-              throw 'Unable to read AppVersion from installer\TimeSync.iss.'
-          }
-
-          $version = $Matches[1]
-          if ($env:RELEASE_TAG -ne "v$version") {
-              throw "Release tag '$env:RELEASE_TAG' does not match installer version '$version'."
-          }
-
-          $isccCandidates = @(
-              (Get-Command -Name 'ISCC.exe' -CommandType Application -ErrorAction SilentlyContinue |
-                  Select-Object -First 1 -ExpandProperty Source),
-              (Join-Path -Path $env:ProgramFiles -ChildPath 'Inno Setup 6\ISCC.exe'),
-              (Join-Path -Path ${env:ProgramFiles(x86)} -ChildPath 'Inno Setup 6\ISCC.exe'),
-              (Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Programs\Inno Setup 6\ISCC.exe')
-          ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-
-          if ($null -eq ($isccCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)) {
-              throw 'Inno Setup 6 is not installed on the Windows runner. Install it before running this workflow.'
-          }
-
-          $utf8NoBom = New-Object Text.UTF8Encoding($false)
-          $environmentFile = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_ENV)) {
-              $env:FORGEJO_ENV
-          }
-          else {
-              $env:GITHUB_ENV
-          }
-          [IO.File]::AppendAllText($environmentFile, "RELEASE_VERSION=$version`n", $utf8NoBom)
-
-      - name: Build x64 and ARM64 installers
+      - name: Build Windows x64 installer
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          Set-Location -LiteralPath $env:SOURCE_DIRECTORY
+          set -Eeuo pipefail
+          version="$(sed -n 's/^!define APP_VERSION "\([^"]*\)"$/\1/p' source/installer/TimeSync.nsi)"
+          test -n "$version" || { echo 'Unable to read APP_VERSION.' >&2; exit 1; }
+          bash source/build-scripts/build-linux.sh \
+            x64 \
+            "WinTime-${version}-windows-x64-setup.exe"
+          test -s "source/dist/WinTime-${version}-windows-x64-setup.exe"
 
-          $targets = @(
-              @{ Architecture = 'x64'; FileName = "WinTime-$env:RELEASE_VERSION-windows-x64-setup.exe" },
-              @{ Architecture = 'arm64'; FileName = "WinTime-$env:RELEASE_VERSION-windows-arm64-setup.exe" }
-          )
+      - name: Upload Windows x64 candidate
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wintime-windows-x64
+          path: source/dist/WinTime-*-windows-x64-setup.exe
+          if-no-files-found: error
+          retention-days: 7
 
-          foreach ($target in $targets) {
-              & '.\build-scripts\build.ps1' `
-                  -Architecture $target.Architecture `
-                  -OutputFileName $target.FileName
-              if ($LASTEXITCODE -ne 0) {
-                  throw "The $($target.Architecture) installer build failed with exit code $LASTEXITCODE."
-              }
+  build-windows-arm64:
+    name: Cross-compile Windows ARM64 installer
+    runs-on: arm-ubuntu-22.04
+    timeout-minutes: 20
 
-              $outputPath = Join-Path -Path 'dist' -ChildPath $target.FileName
-              if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
-                  throw "The $($target.Architecture) build did not produce '$outputPath'."
-              }
-          }
+    steps:
+      - name: Check out event commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : "${FORGEJO_TOKEN:?Forgejo did not provide FORGEJO_TOKEN}"
+          : "${GITHUB_SHA:?Forgejo did not provide GITHUB_SHA}"
+
+          repository_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?}}/${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?}}.git"
+          credentials="$(printf 'x-access-token:%s' "$FORGEJO_TOKEN" | base64 -w0)"
+          test ! -e source || { echo 'The isolated source directory already exists.' >&2; exit 1; }
+          git init source
+          git -C source remote add origin "$repository_url"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.extraHeader \
+          GIT_CONFIG_VALUE_0="Authorization: Basic $credentials" \
+            git -C source fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git -C source checkout --detach FETCH_HEAD
+
+      - name: Install cross-packaging dependency
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(. /etc/os-release; printf '%s' "${ID:-}")" = ubuntu
+          if [[ "$EUID" -eq 0 ]]; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nsis
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nsis
+          else
+            echo 'Installing NSIS requires root or sudo.' >&2
+            exit 1
+          fi
+
+      - name: Build Windows ARM64 installer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(sed -n 's/^!define APP_VERSION "\([^"]*\)"$/\1/p' source/installer/TimeSync.nsi)"
+          test -n "$version" || { echo 'Unable to read APP_VERSION.' >&2; exit 1; }
+          bash source/build-scripts/build-linux.sh \
+            arm64 \
+            "WinTime-${version}-windows-arm64-setup.exe"
+          test -s "source/dist/WinTime-${version}-windows-arm64-setup.exe"
+
+      - name: Upload Windows ARM64 candidate
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wintime-windows-arm64
+          path: source/dist/WinTime-*-windows-arm64-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-and-mirror:
+    name: Sign and mirror trusted builds
+    needs: [build-windows-x64, build-windows-arm64]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Install signing and publication dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(. /etc/os-release; printf '%s' "${ID:-}")" = ubuntu
+          packages=(ca-certificates curl git gnupg jq)
+          if [[ "$EUID" -eq 0 ]]; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+          else
+            echo 'Installing signing dependencies requires root or sudo.' >&2
+            exit 1
+          fi
+
+      - name: Check out event commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : "${FORGEJO_TOKEN:?Forgejo did not provide FORGEJO_TOKEN}"
+          : "${GITHUB_SHA:?Forgejo did not provide GITHUB_SHA}"
+
+          repository_url="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:?}}/${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?}}.git"
+          credentials="$(printf 'x-access-token:%s' "$FORGEJO_TOKEN" | base64 -w0)"
+          test ! -e source || { echo 'The isolated source directory already exists.' >&2; exit 1; }
+          git init source
+          git -C source remote add origin "$repository_url"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.extraHeader \
+          GIT_CONFIG_VALUE_0="Authorization: Basic $credentials" \
+            git -C source fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git -C source checkout --detach FETCH_HEAD
+
+      - name: Download Windows x64 candidate
+        uses: https://code.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: wintime-windows-x64
+          path: staging
+
+      - name: Download Windows ARM64 candidate
+        uses: https://code.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: wintime-windows-arm64
+          path: staging
+
+      - name: Validate candidates and release identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(sed -n 's/^!define APP_VERSION "\([^"]*\)"$/\1/p' source/installer/TimeSync.nsi)"
+          test -n "$version" || { echo 'Unable to read APP_VERSION.' >&2; exit 1; }
+          test -s "staging/WinTime-${version}-windows-x64-setup.exe"
+          test -s "staging/WinTime-${version}-windows-arm64-setup.exe"
+
+          ref="${FORGEJO_REF:-${GITHUB_REF:?}}"
+          if [[ "$ref" == refs/tags/* ]]; then
+            tag="${ref#refs/tags/}"
+            [[ "$tag" == "v${version}" ]] || {
+              printf "Release tag '%s' does not match installer version '%s'.\n" "$tag" "$version" >&2
+              exit 1
+            }
+            printf 'RELEASE_TAG=%s\n' "$tag" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+          fi
+          printf 'RELEASE_VERSION=%s\n' "$version" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
 
       - name: Create checksums and detached signatures
+        shell: bash
         env:
           CI_KEY_B64: ${{ secrets.CI_KEY_B64 }}
           CI_KEY_PASSPHRASE: ${{ secrets.CI_KEY_PASSPHRASE }}
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          Set-Location -LiteralPath $env:SOURCE_DIRECTORY
+          set -Eeuo pipefail
+          : "${CI_KEY_B64:?Missing required secret CI_KEY_B64}"
+          : "${CI_KEY_PASSPHRASE:?Missing required secret CI_KEY_PASSPHRASE}"
 
-          if ([string]::IsNullOrWhiteSpace($env:CI_KEY_B64)) {
-              throw 'The required CI_KEY_B64 secret is empty or unavailable.'
+          key_file="$(mktemp "${RUNNER_TEMP:?}/wintime-release-key.XXXXXXXX")"
+          gpg_home="$(mktemp -d "${RUNNER_TEMP:?}/wintime-gnupg.XXXXXXXX")"
+          cleanup() {
+            rm -f -- "$key_file"
+            rm -rf -- "$gpg_home"
           }
-          if ([string]::IsNullOrWhiteSpace($env:CI_KEY_PASSPHRASE)) {
-              throw 'The required CI_KEY_PASSPHRASE secret is empty or unavailable.'
-          }
+          trap cleanup EXIT
+          chmod 700 "$gpg_home"
+          export GNUPGHOME="$gpg_home"
 
-          $releaseDirectory = [IO.Path]::GetFullPath((Join-Path -Path $PWD -ChildPath 'dist'))
-          $installers = @(
-              (Join-Path -Path $releaseDirectory -ChildPath "WinTime-$env:RELEASE_VERSION-windows-x64-setup.exe"),
-              (Join-Path -Path $releaseDirectory -ChildPath "WinTime-$env:RELEASE_VERSION-windows-arm64-setup.exe")
+          if ! printf '%s' "$CI_KEY_B64" | base64 --decode > "$key_file"; then
+            echo 'CI_KEY_B64 is not valid base64.' >&2
+            exit 1
+          fi
+          gpg --batch --import "$key_file"
+
+          mapfile -t fingerprints < <(
+            gpg --batch --with-colons --list-secret-keys \
+              | awk -F: '$1 == "sec" { want = 1; next } want && $1 == "fpr" { print $10; want = 0 }'
           )
-          $keyFile = Join-Path -Path $env:RUNNER_TEMP -ChildPath 'wintime-release-key.gpg'
-          $gpgHome = Join-Path -Path $env:RUNNER_TEMP -ChildPath 'wintime-gnupg'
-          $previousGpgHome = $env:GNUPGHOME
-
-          try {
-              try {
-                  $keyBytes = [Convert]::FromBase64String($env:CI_KEY_B64)
-              }
-              catch {
-                  throw "CI_KEY_B64 is not valid base64: $($_.Exception.Message)"
-              }
-
-              [IO.File]::WriteAllBytes($keyFile, $keyBytes)
-              New-Item -ItemType Directory -Path $gpgHome | Out-Null
-              $env:GNUPGHOME = $gpgHome
-
-              & gpg.exe --batch --import $keyFile
-              if ($LASTEXITCODE -ne 0) {
-                  throw "Importing CI_KEY_B64 failed with exit code $LASTEXITCODE."
-              }
-
-              $secretKeyRecords = @(& gpg.exe --batch --with-colons --list-secret-keys)
-              if ($LASTEXITCODE -ne 0) {
-                  throw "Listing imported secret keys failed with exit code $LASTEXITCODE."
-              }
-
-              $primaryKeyCount = @($secretKeyRecords | Where-Object { $_ -like 'sec:*' }).Count
-              $primaryFingerprints = @()
-              $expectPrimaryFingerprint = $false
-              foreach ($record in $secretKeyRecords) {
-                  $fields = $record -split ':'
-                  if ($fields[0] -eq 'sec') {
-                      $expectPrimaryFingerprint = $true
-                  }
-                  elseif ($expectPrimaryFingerprint -and $fields[0] -eq 'fpr') {
-                      $primaryFingerprints += $fields[9]
-                      $expectPrimaryFingerprint = $false
-                  }
-                  elseif ($fields[0] -eq 'ssb') {
-                      $expectPrimaryFingerprint = $false
-                  }
-              }
-
-              if ($primaryKeyCount -ne 1 -or $primaryFingerprints.Count -ne 1) {
-                  throw "CI_KEY_B64 must contain exactly one primary secret key; found $primaryKeyCount."
-              }
-              $fingerprint = $primaryFingerprints[0]
-
-              $checksumLines = foreach ($installer in $installers) {
-                  if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
-                      throw "Expected release installer is missing: '$installer'."
-                  }
-                  $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-                  "$hash *$([IO.Path]::GetFileName($installer))"
-              }
-
-              $checksumFile = Join-Path -Path $releaseDirectory -ChildPath 'SHA256SUMS'
-              $utf8NoBom = New-Object Text.UTF8Encoding($false)
-              [IO.File]::WriteAllText($checksumFile, (($checksumLines -join "`n") + "`n"), $utf8NoBom)
-
-              foreach ($file in @($installers) + @($checksumFile)) {
-                  $signature = "$file.sig"
-                  $env:CI_KEY_PASSPHRASE | & gpg.exe `
-                      --batch `
-                      --yes `
-                      --pinentry-mode loopback `
-                      --passphrase-fd 0 `
-                      --local-user $fingerprint `
-                      --output $signature `
-                      --detach-sign $file
-                  if ($LASTEXITCODE -ne 0) {
-                      throw "Signing '$file' failed with exit code $LASTEXITCODE."
-                  }
-
-                  & gpg.exe --batch --verify $signature $file
-                  if ($LASTEXITCODE -ne 0) {
-                      throw "Signature verification failed for '$file' with exit code $LASTEXITCODE."
-                  }
-              }
-
-              foreach ($line in Get-Content -LiteralPath $checksumFile) {
-                  if ($line -notmatch '^([0-9a-f]{64}) \*(.+)$') {
-                      throw "Invalid SHA256SUMS entry: '$line'."
-                  }
-                  $artifactPath = Join-Path -Path $releaseDirectory -ChildPath $Matches[2]
-                  $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
-                  if ($actualHash -ne $Matches[1]) {
-                      throw "SHA256 verification failed for '$($Matches[2])'."
-                  }
-              }
-
-              $utf8NoBom = New-Object Text.UTF8Encoding($false)
-              $environmentFile = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_ENV)) {
-                  $env:FORGEJO_ENV
-              }
-              else {
-                  $env:GITHUB_ENV
-              }
-              [IO.File]::AppendAllText($environmentFile, "SIGNING_FINGERPRINT=$fingerprint`n", $utf8NoBom)
+          [[ "${#fingerprints[@]}" -eq 1 ]] || {
+            printf 'CI_KEY_B64 must contain exactly one primary secret key; found %s.\n' \
+              "${#fingerprints[@]}" >&2
+            exit 1
           }
-          finally {
-              $env:GNUPGHOME = $previousGpgHome
-              if (Test-Path -LiteralPath $keyFile -PathType Leaf) {
-                  Remove-Item -LiteralPath $keyFile -Force
-              }
-              if (Test-Path -LiteralPath $gpgHome -PathType Container) {
-                  Remove-Item -LiteralPath $gpgHome -Recurse -Force
-              }
-          }
+          fingerprint="${fingerprints[0]}"
 
-      - name: Publish Forgejo release
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          Set-Location -LiteralPath $env:SOURCE_DIRECTORY
-
-          $apiUrl = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_API_URL)) {
-              $env:FORGEJO_API_URL
-          }
-          else {
-              $env:GITHUB_API_URL
-          }
-          $repository = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_REPOSITORY)) {
-              $env:FORGEJO_REPOSITORY
-          }
-          else {
-              $env:GITHUB_REPOSITORY
-          }
-          if ([string]::IsNullOrWhiteSpace($apiUrl) -or
-              [string]::IsNullOrWhiteSpace($repository) -or
-              [string]::IsNullOrWhiteSpace($env:FORGEJO_TOKEN)) {
-              throw 'Forgejo release API variables or token are unavailable.'
-          }
-
-          $headers = @{
-              Authorization = "token $env:FORGEJO_TOKEN"
-              Accept = 'application/json'
-          }
-          $repositoryApi = "$apiUrl/repos/$repository"
-          $releaseBody = @"
-          WinTime $env:RELEASE_VERSION for Windows x64 and Windows ARM64.
-
-          Signing key fingerprint: $env:SIGNING_FINGERPRINT
-
-          Verify an installer:
-          gpg --verify <installer>.sig <installer>
-
-          Verify the checksum manifest and installers:
-          gpg --verify SHA256SUMS.sig SHA256SUMS
-          sha256sum --check --strict SHA256SUMS
-          "@ -replace '(?m)^          ', ''
-          $payload = @{
-              tag_name = $env:RELEASE_TAG
-              name = "WinTime $env:RELEASE_VERSION"
-              body = $releaseBody
-              draft = $false
-              prerelease = ($env:RELEASE_VERSION -match '-')
-          } | ConvertTo-Json
-
-          try {
-              $release = Invoke-RestMethod `
-                  -Method Get `
-                  -Uri "$repositoryApi/releases/tags/$env:RELEASE_TAG" `
-                  -Headers $headers
-              $release = Invoke-RestMethod `
-                  -Method Patch `
-                  -Uri "$repositoryApi/releases/$($release.id)" `
-                  -Headers $headers `
-                  -ContentType 'application/json' `
-                  -Body $payload
-          }
-          catch {
-              if ($_.Exception.Response.StatusCode.value__ -ne 404) {
-                  throw
-              }
-              $release = Invoke-RestMethod `
-                  -Method Post `
-                  -Uri "$repositoryApi/releases" `
-                  -Headers $headers `
-                  -ContentType 'application/json' `
-                  -Body $payload
-          }
-
-          $assetPaths = @(
-              "dist\WinTime-$env:RELEASE_VERSION-windows-x64-setup.exe",
-              "dist\WinTime-$env:RELEASE_VERSION-windows-x64-setup.exe.sig",
-              "dist\WinTime-$env:RELEASE_VERSION-windows-arm64-setup.exe",
-              "dist\WinTime-$env:RELEASE_VERSION-windows-arm64-setup.exe.sig",
-              'dist\SHA256SUMS',
-              'dist\SHA256SUMS.sig'
+          artifacts=(
+            "staging/WinTime-${RELEASE_VERSION}-windows-x64-setup.exe"
+            "staging/WinTime-${RELEASE_VERSION}-windows-arm64-setup.exe"
           )
-          $existingAssets = @(Invoke-RestMethod `
-              -Method Get `
-              -Uri "$repositoryApi/releases/$($release.id)/assets" `
-              -Headers $headers)
-          Add-Type -AssemblyName System.Net.Http
+          (
+            cd staging
+            sha256sum -- \
+              "WinTime-${RELEASE_VERSION}-windows-x64-setup.exe" \
+              "WinTime-${RELEASE_VERSION}-windows-arm64-setup.exe" \
+              > SHA256SUMS
+          )
 
-          foreach ($assetPath in $assetPaths) {
-              if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
-                  throw "Release asset is missing: '$assetPath'."
-              }
-              $assetName = [IO.Path]::GetFileName($assetPath)
-              foreach ($existingAsset in @($existingAssets | Where-Object { $_.name -eq $assetName })) {
-                  Invoke-RestMethod `
-                      -Method Delete `
-                      -Uri "$repositoryApi/releases/$($release.id)/assets/$($existingAsset.id)" `
-                      -Headers $headers | Out-Null
-              }
+          for file in "${artifacts[@]}" staging/SHA256SUMS; do
+            printf '%s\n' "$CI_KEY_PASSPHRASE" \
+              | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+                  --local-user "$fingerprint" --output "${file}.sig" --detach-sign "$file"
+            gpg --batch --verify "${file}.sig" "$file"
+          done
+          (cd staging && sha256sum --check --strict SHA256SUMS)
 
-              $client = New-Object Net.Http.HttpClient
-              try {
-                  $client.DefaultRequestHeaders.Add('Authorization', "token $env:FORGEJO_TOKEN")
-                  $content = New-Object Net.Http.MultipartFormDataContent
-                  $stream = [IO.File]::OpenRead((Resolve-Path -LiteralPath $assetPath))
-                  try {
-                      $fileContent = New-Object Net.Http.StreamContent($stream)
-                      $content.Add($fileContent, 'attachment', $assetName)
-                      $encodedName = [Uri]::EscapeDataString($assetName)
-                      $response = $client.PostAsync(
-                          "$repositoryApi/releases/$($release.id)/assets?name=$encodedName",
-                          $content
-                      ).GetAwaiter().GetResult()
-                      if (-not $response.IsSuccessStatusCode) {
-                          $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-                          throw "Uploading Forgejo asset '$assetName' failed with HTTP $([int]$response.StatusCode): $responseBody"
-                      }
-                  }
-                  finally {
-                      if ($null -ne $stream) {
-                          $stream.Dispose()
-                      }
-                      if ($null -ne $content) {
-                          $content.Dispose()
-                      }
-                  }
-              }
-              finally {
-                  $client.Dispose()
-              }
-          }
+          printf 'SIGNING_FINGERPRINT=%s\n' "$fingerprint" \
+            >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
 
-      - name: Mirror repository and release to GitHub
+      - name: Upload signed build bundle
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: wintime-windows-signed
+          path: staging/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Mirror Git heads and tags
+        shell: bash
         env:
           GH_KEY: ${{ secrets.GH_KEY }}
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          Set-Location -LiteralPath $env:SOURCE_DIRECTORY
+          set -Eeuo pipefail
+          : "${GH_KEY:?Missing required secret GH_KEY}"
+          : "${FORGEJO_TOKEN:?Forgejo did not provide FORGEJO_TOKEN}"
 
-          if ([string]::IsNullOrWhiteSpace($env:GH_KEY)) {
-              throw 'The required GH_KEY secret is empty or unavailable.'
-          }
+          forgejo_credentials="$(printf 'x-access-token:%s' "$FORGEJO_TOKEN" | base64 -w0)"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.extraHeader \
+          GIT_CONFIG_VALUE_0="Authorization: Basic $forgejo_credentials" \
+            git -C source fetch origin \
+              '+refs/heads/*:refs/remotes/forgejo/*' \
+              '+refs/tags/*:refs/tags/*'
 
-          $forgejoCredentials = [Convert]::ToBase64String(
-              [Text.Encoding]::ASCII.GetBytes("x-access-token:$env:FORGEJO_TOKEN")
-          )
-          $githubCredentials = [Convert]::ToBase64String(
-              [Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GH_KEY")
-          )
-          $mirrorDirectory = Join-Path -Path $env:RUNNER_TEMP -ChildPath 'wintime-git-mirror.git'
-          $serverUrl = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_SERVER_URL)) {
-              $env:FORGEJO_SERVER_URL
-          }
-          else {
-              $env:GITHUB_SERVER_URL
-          }
-          $repository = if (-not [string]::IsNullOrWhiteSpace($env:FORGEJO_REPOSITORY)) {
-              $env:FORGEJO_REPOSITORY
-          }
-          else {
-              $env:GITHUB_REPOSITORY
-          }
-          $forgejoRepositoryUrl = "$serverUrl/$repository.git"
-          $githubRepositoryUrl = 'https://github.com/firebadnofire/WinTime.git'
+          git -C source remote add github 'https://github.com/firebadnofire/WinTime.git'
+          github_credentials="$(printf 'x-access-token:%s' "$GH_KEY" | base64 -w0)"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.extraHeader \
+          GIT_CONFIG_VALUE_0="Authorization: Basic $github_credentials" \
+            git -C source push --force --prune github \
+              '+refs/remotes/forgejo/*:refs/heads/*' \
+              '+refs/tags/*:refs/tags/*'
 
-          try {
-              $env:GIT_CONFIG_COUNT = '1'
-              $env:GIT_CONFIG_KEY_0 = 'http.extraHeader'
-              $env:GIT_CONFIG_VALUE_0 = "Authorization: Basic $forgejoCredentials"
-              git clone --bare $forgejoRepositoryUrl $mirrorDirectory
-              if ($LASTEXITCODE -ne 0) {
-                  throw "Cloning the Forgejo repository for mirroring failed with exit code $LASTEXITCODE."
-              }
+      - name: Publish Forgejo release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : "${FORGEJO_TOKEN:?Forgejo did not provide FORGEJO_TOKEN}"
+          : "${RELEASE_TAG:?Release tag was not resolved}"
+          api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?}}"
+          repository_api="${api_url}/repos/${repository}"
+          response_file="$(mktemp "${RUNNER_TEMP:?}/forgejo-release.XXXXXXXX")"
+          payload_file="$(mktemp "${RUNNER_TEMP:?}/forgejo-payload.XXXXXXXX")"
+          cleanup() { rm -f -- "$response_file" "$payload_file"; }
+          trap cleanup EXIT
 
-              git -C $mirrorDirectory remote add github $githubRepositoryUrl
-              if ($LASTEXITCODE -ne 0) {
-                  throw "Adding the GitHub mirror remote failed with exit code $LASTEXITCODE."
-              }
+          release_body="$(cat <<EOF
+          WinTime ${RELEASE_VERSION} for Windows x64 and Windows ARM64.
 
-              $env:GIT_CONFIG_VALUE_0 = "Authorization: Basic $githubCredentials"
-              git -C $mirrorDirectory push --force --prune github `
-                  'refs/heads/*:refs/heads/*' `
-                  'refs/tags/*:refs/tags/*'
-              if ($LASTEXITCODE -ne 0) {
-                  throw "Mirroring Git heads and tags failed with exit code $LASTEXITCODE."
-              }
-          }
-          finally {
-              Remove-Item Env:GIT_CONFIG_COUNT -ErrorAction SilentlyContinue
-              Remove-Item Env:GIT_CONFIG_KEY_0 -ErrorAction SilentlyContinue
-              Remove-Item Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
-              if (Test-Path -LiteralPath $mirrorDirectory -PathType Container) {
-                  Remove-Item -LiteralPath $mirrorDirectory -Recurse -Force
-              }
-          }
-
-          $headers = @{
-              Authorization = "Bearer $env:GH_KEY"
-              Accept = 'application/vnd.github+json'
-              'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $repositoryApi = 'https://api.github.com/repos/firebadnofire/WinTime'
-          $releaseBody = @"
-          WinTime $env:RELEASE_VERSION for Windows x64 and Windows ARM64.
-
-          Signing key fingerprint: $env:SIGNING_FINGERPRINT
+          Signing key fingerprint: ${SIGNING_FINGERPRINT}
 
           Verify an installer:
           gpg --verify <installer>.sig <installer>
@@ -559,75 +331,152 @@ jobs:
           Verify the checksum manifest and installers:
           gpg --verify SHA256SUMS.sig SHA256SUMS
           sha256sum --check --strict SHA256SUMS
-          "@ -replace '(?m)^          ', ''
-          $payload = @{
-              tag_name = $env:RELEASE_TAG
-              name = "WinTime $env:RELEASE_VERSION"
-              body = $releaseBody
-              draft = $false
-              prerelease = ($env:RELEASE_VERSION -match '-')
-          } | ConvertTo-Json
+          EOF
+          )"
+          prerelease=false
+          [[ "$RELEASE_VERSION" == *-* ]] && prerelease=true
+          jq -n \
+            --arg tag "$RELEASE_TAG" \
+            --arg name "WinTime ${RELEASE_VERSION}" \
+            --arg body "$release_body" \
+            --argjson prerelease "$prerelease" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: $prerelease}' \
+            > "$payload_file"
 
-          try {
-              $release = Invoke-RestMethod `
-                  -Method Get `
-                  -Uri "$repositoryApi/releases/tags/$env:RELEASE_TAG" `
-                  -Headers $headers
-              $release = Invoke-RestMethod `
-                  -Method Patch `
-                  -Uri "$repositoryApi/releases/$($release.id)" `
-                  -Headers $headers `
-                  -ContentType 'application/json' `
-                  -Body $payload
-          }
-          catch {
-              if ($_.Exception.Response.StatusCode.value__ -ne 404) {
-                  throw
-              }
-              $release = Invoke-RestMethod `
-                  -Method Post `
-                  -Uri "$repositoryApi/releases" `
-                  -Headers $headers `
-                  -ContentType 'application/json' `
-                  -Body $payload
-          }
+          status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+            --header "Authorization: token ${FORGEJO_TOKEN}" \
+            --header 'Accept: application/json' \
+            "${repository_api}/releases/tags/${RELEASE_TAG}")"
+          if [[ "$status" == 200 ]]; then
+            release_id="$(jq -r '.id' "$response_file")"
+            curl --fail-with-body --silent --show-error \
+              --request PATCH \
+              --header "Authorization: token ${FORGEJO_TOKEN}" \
+              --header 'Content-Type: application/json' \
+              --data-binary "@${payload_file}" \
+              "${repository_api}/releases/${release_id}" > "$response_file"
+          elif [[ "$status" == 404 ]]; then
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: token ${FORGEJO_TOKEN}" \
+              --header 'Content-Type: application/json' \
+              --data-binary "@${payload_file}" \
+              "${repository_api}/releases" > "$response_file"
+            release_id="$(jq -r '.id' "$response_file")"
+          else
+            printf 'Forgejo release lookup failed with HTTP %s: ' "$status" >&2
+            cat "$response_file" >&2
+            exit 1
+          fi
+          [[ "$release_id" =~ ^[0-9]+$ ]] || { echo 'Forgejo release response had no numeric id.' >&2; exit 1; }
 
-          $assetPaths = @(
-              "dist\WinTime-$env:RELEASE_VERSION-windows-x64-setup.exe",
-              "dist\WinTime-$env:RELEASE_VERSION-windows-x64-setup.exe.sig",
-              "dist\WinTime-$env:RELEASE_VERSION-windows-arm64-setup.exe",
-              "dist\WinTime-$env:RELEASE_VERSION-windows-arm64-setup.exe.sig",
-              'dist\SHA256SUMS',
-              'dist\SHA256SUMS.sig'
+          existing_assets="$(curl --fail-with-body --silent --show-error \
+            --header "Authorization: token ${FORGEJO_TOKEN}" \
+            "${repository_api}/releases/${release_id}/assets")"
+          for asset in staging/*; do
+            asset_name="$(basename -- "$asset")"
+            while IFS= read -r asset_id; do
+              [[ -n "$asset_id" ]] || continue
+              curl --fail-with-body --silent --show-error \
+                --request DELETE \
+                --header "Authorization: token ${FORGEJO_TOKEN}" \
+                "${repository_api}/releases/${release_id}/assets/${asset_id}" > /dev/null
+            done < <(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' <<< "$existing_assets")
+            encoded_name="$(jq -rn --arg value "$asset_name" '$value | @uri')"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: token ${FORGEJO_TOKEN}" \
+              --form "attachment=@${asset}" \
+              "${repository_api}/releases/${release_id}/assets?name=${encoded_name}" > /dev/null
+          done
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_KEY: ${{ secrets.GH_KEY }}
+        run: |
+          set -Eeuo pipefail
+          : "${GH_KEY:?Missing required secret GH_KEY}"
+          : "${RELEASE_TAG:?Release tag was not resolved}"
+          repository_api='https://api.github.com/repos/firebadnofire/WinTime'
+          response_file="$(mktemp "${RUNNER_TEMP:?}/github-release.XXXXXXXX")"
+          payload_file="$(mktemp "${RUNNER_TEMP:?}/github-payload.XXXXXXXX")"
+          cleanup() { rm -f -- "$response_file" "$payload_file"; }
+          trap cleanup EXIT
+
+          release_body="$(cat <<EOF
+          WinTime ${RELEASE_VERSION} for Windows x64 and Windows ARM64.
+
+          Signing key fingerprint: ${SIGNING_FINGERPRINT}
+
+          Verify an installer:
+          gpg --verify <installer>.sig <installer>
+
+          Verify the checksum manifest and installers:
+          gpg --verify SHA256SUMS.sig SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          EOF
+          )"
+          prerelease=false
+          [[ "$RELEASE_VERSION" == *-* ]] && prerelease=true
+          jq -n \
+            --arg tag "$RELEASE_TAG" \
+            --arg name "WinTime ${RELEASE_VERSION}" \
+            --arg body "$release_body" \
+            --argjson prerelease "$prerelease" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: $prerelease}' \
+            > "$payload_file"
+
+          github_headers=(
+            --header "Authorization: Bearer ${GH_KEY}"
+            --header 'Accept: application/vnd.github+json'
+            --header 'X-GitHub-Api-Version: 2022-11-28'
           )
-          $existingAssets = @(Invoke-RestMethod `
-              -Method Get `
-              -Uri "$repositoryApi/releases/$($release.id)/assets?per_page=100" `
-              -Headers $headers)
+          status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+            "${github_headers[@]}" \
+            "${repository_api}/releases/tags/${RELEASE_TAG}")"
+          if [[ "$status" == 200 ]]; then
+            release_id="$(jq -r '.id' "$response_file")"
+            curl --fail-with-body --silent --show-error \
+              --request PATCH \
+              "${github_headers[@]}" \
+              --header 'Content-Type: application/json' \
+              --data-binary "@${payload_file}" \
+              "${repository_api}/releases/${release_id}" > "$response_file"
+          elif [[ "$status" == 404 ]]; then
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              "${github_headers[@]}" \
+              --header 'Content-Type: application/json' \
+              --data-binary "@${payload_file}" \
+              "${repository_api}/releases" > "$response_file"
+            release_id="$(jq -r '.id' "$response_file")"
+          else
+            printf 'GitHub release lookup failed with HTTP %s: ' "$status" >&2
+            cat "$response_file" >&2
+            exit 1
+          fi
+          [[ "$release_id" =~ ^[0-9]+$ ]] || { echo 'GitHub release response had no numeric id.' >&2; exit 1; }
 
-          foreach ($assetPath in $assetPaths) {
-              if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
-                  throw "Release asset is missing: '$assetPath'."
-              }
-              $assetName = [IO.Path]::GetFileName($assetPath)
-              foreach ($existingAsset in @($existingAssets | Where-Object { $_.name -eq $assetName })) {
-                  Invoke-RestMethod `
-                      -Method Delete `
-                      -Uri "$repositoryApi/releases/assets/$($existingAsset.id)" `
-                      -Headers $headers | Out-Null
-              }
-
-              $encodedName = [Uri]::EscapeDataString($assetName)
-              $uploadUri = "https://uploads.github.com/repos/firebadnofire/WinTime/releases/$($release.id)/assets?name=$encodedName"
-              $uploadHeaders = @{
-                  Authorization = "Bearer $env:GH_KEY"
-                  Accept = 'application/vnd.github+json'
-                  'X-GitHub-Api-Version' = '2022-11-28'
-              }
-              Invoke-RestMethod `
-                  -Method Post `
-                  -Uri $uploadUri `
-                  -Headers $uploadHeaders `
-                  -ContentType 'application/octet-stream' `
-                  -InFile $assetPath | Out-Null
-          }
+          existing_assets="$(curl --fail-with-body --silent --show-error \
+            "${github_headers[@]}" \
+            "${repository_api}/releases/${release_id}/assets?per_page=100")"
+          for asset in staging/*; do
+            asset_name="$(basename -- "$asset")"
+            while IFS= read -r asset_id; do
+              [[ -n "$asset_id" ]] || continue
+              curl --fail-with-body --silent --show-error \
+                --request DELETE \
+                "${github_headers[@]}" \
+                "${repository_api}/releases/assets/${asset_id}" > /dev/null
+            done < <(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' <<< "$existing_assets")
+            encoded_name="$(jq -rn --arg value "$asset_name" '$value | @uri')"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              "${github_headers[@]}" \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@${asset}" \
+              "https://uploads.github.com/repos/firebadnofire/WinTime/releases/${release_id}/assets?name=${encoded_name}" \
+              > /dev/null
+          done
