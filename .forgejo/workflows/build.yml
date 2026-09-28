@@ -219,6 +219,24 @@ jobs:
               exit 1
             }
             printf 'RELEASE_TAG=%s\n' "$tag" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+            printf 'RELEASE_NAME=WinTime %s\n' "$version" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+            if [[ "$version" == *-* ]]; then
+              printf 'RELEASE_PRERELEASE=true\n' >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+            else
+              printf 'RELEASE_PRERELEASE=false\n' >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+            fi
+          elif [[ "$ref" == refs/heads/main ]]; then
+            : "${GITHUB_SHA:?Forgejo did not provide GITHUB_SHA}"
+            [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo 'Forgejo commit SHA is not a 40-character hexadecimal value.' >&2
+              exit 1
+            }
+            printf 'RELEASE_TAG=build-%s\n' "$GITHUB_SHA" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+            printf 'RELEASE_NAME=WinTime %s (build %.12s)\n' "$version" "$GITHUB_SHA" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+            printf 'RELEASE_PRERELEASE=true\n' >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+          else
+            printf 'Unexpected release ref: %s\n' "$ref" >&2
+            exit 1
           fi
           printf 'RELEASE_VERSION=%s\n' "$version" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
 
@@ -290,6 +308,25 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Tag signed main build in Forgejo
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : "${FORGEJO_TOKEN:?Forgejo did not provide FORGEJO_TOKEN}"
+          : "${RELEASE_TAG:?Release tag was not resolved}"
+          : "${GITHUB_SHA:?Forgejo did not provide GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo 'Checked-out source does not match the release commit.' >&2
+            exit 1
+          }
+          git -C source -c tag.gpgsign=false tag "$RELEASE_TAG" "$GITHUB_SHA"
+          forgejo_credentials="$(printf 'x-access-token:%s' "$FORGEJO_TOKEN" | base64 -w0)"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.extraHeader \
+          GIT_CONFIG_VALUE_0="Authorization: Basic $forgejo_credentials" \
+            git -C source push origin "refs/tags/${RELEASE_TAG}"
+
       - name: Mirror Git heads and tags
         shell: bash
         env:
@@ -317,12 +354,13 @@ jobs:
               '+refs/tags/*:refs/tags/*'
 
       - name: Publish Forgejo release
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           set -Eeuo pipefail
           : "${FORGEJO_TOKEN:?Forgejo did not provide FORGEJO_TOKEN}"
           : "${RELEASE_TAG:?Release tag was not resolved}"
+          : "${RELEASE_NAME:?Release name was not resolved}"
+          : "${RELEASE_PRERELEASE:?Release type was not resolved}"
           api_url="${FORGEJO_API_URL:-${GITHUB_API_URL:?}}"
           repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY:?}}"
           repository_api="${api_url}/repos/${repository}"
@@ -344,13 +382,11 @@ jobs:
           sha256sum --check --strict SHA256SUMS
           EOF
           )"
-          prerelease=false
-          [[ "$RELEASE_VERSION" == *-* ]] && prerelease=true
           jq -n \
             --arg tag "$RELEASE_TAG" \
-            --arg name "WinTime ${RELEASE_VERSION}" \
+            --arg name "$RELEASE_NAME" \
             --arg body "$release_body" \
-            --argjson prerelease "$prerelease" \
+            --argjson prerelease "$RELEASE_PRERELEASE" \
             '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: $prerelease}' \
             > "$payload_file"
 
@@ -402,7 +438,6 @@ jobs:
           done
 
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_KEY: ${{ secrets.GH_KEY }}
@@ -410,6 +445,8 @@ jobs:
           set -Eeuo pipefail
           : "${GH_KEY:?Missing required secret GH_KEY}"
           : "${RELEASE_TAG:?Release tag was not resolved}"
+          : "${RELEASE_NAME:?Release name was not resolved}"
+          : "${RELEASE_PRERELEASE:?Release type was not resolved}"
           repository_api='https://api.github.com/repos/firebadnofire/WinTime'
           response_file="$(mktemp "${RUNNER_TEMP:?}/github-release.XXXXXXXX")"
           payload_file="$(mktemp "${RUNNER_TEMP:?}/github-payload.XXXXXXXX")"
@@ -429,13 +466,11 @@ jobs:
           sha256sum --check --strict SHA256SUMS
           EOF
           )"
-          prerelease=false
-          [[ "$RELEASE_VERSION" == *-* ]] && prerelease=true
           jq -n \
             --arg tag "$RELEASE_TAG" \
-            --arg name "WinTime ${RELEASE_VERSION}" \
+            --arg name "$RELEASE_NAME" \
             --arg body "$release_body" \
-            --argjson prerelease "$prerelease" \
+            --argjson prerelease "$RELEASE_PRERELEASE" \
             '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: $prerelease}' \
             > "$payload_file"
 
