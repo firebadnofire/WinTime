@@ -220,11 +220,7 @@ jobs:
             }
             printf 'RELEASE_TAG=%s\n' "$tag" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
             printf 'RELEASE_NAME=WinTime %s\n' "$version" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
-            if [[ "$version" == *-* ]]; then
-              printf 'RELEASE_PRERELEASE=true\n' >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
-            else
-              printf 'RELEASE_PRERELEASE=false\n' >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
-            fi
+            printf 'RELEASE_PRERELEASE=false\n' >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
           elif [[ "$ref" == refs/heads/main ]]; then
             : "${GITHUB_SHA:?Forgejo did not provide GITHUB_SHA}"
             [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -233,7 +229,7 @@ jobs:
             }
             printf 'RELEASE_TAG=build-%s\n' "$GITHUB_SHA" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
             printf 'RELEASE_NAME=WinTime %s (build %.12s)\n' "$version" "$GITHUB_SHA" >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
-            printf 'RELEASE_PRERELEASE=true\n' >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
+            printf 'RELEASE_PRERELEASE=false\n' >> "${FORGEJO_ENV:-${GITHUB_ENV:?}}"
           else
             printf 'Unexpected release ref: %s\n' "$ref" >&2
             exit 1
